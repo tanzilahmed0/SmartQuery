@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from middleware.auth_middleware import verify_token
+from models.project import ProjectCreate, ProjectPublic
 from models.response_schemas import (
     ApiResponse,
     ColumnMetadata,
@@ -16,91 +17,13 @@ from models.response_schemas import (
     ProjectStatus,
     UploadStatusResponse,
 )
+from services.project_service import get_project_service
+from services.storage_service import storage_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+project_service = get_project_service()
 
-# Mock projects database
-MOCK_PROJECTS = {
-    "project_001": {
-        "id": "project_001",
-        "user_id": "user_001",
-        "name": "Sales Data Analysis",
-        "description": "Monthly sales data from Q4 2024",
-        "csv_filename": "sales_data.csv",
-        "csv_path": "user_001/project_001/sales_data.csv",
-        "row_count": 1000,
-        "column_count": 8,
-        "columns_metadata": [
-            {
-                "name": "date",
-                "type": "date",
-                "nullable": False,
-                "sample_values": ["2024-01-01", "2024-01-02", "2024-01-03"],
-                "unique_count": 365,
-            },
-            {
-                "name": "product_name",
-                "type": "string",
-                "nullable": False,
-                "sample_values": ["Product A", "Product B", "Product C"],
-                "unique_count": 50,
-            },
-            {
-                "name": "sales_amount",
-                "type": "number",
-                "nullable": False,
-                "sample_values": [1500.00, 2300.50, 1890.25],
-                "unique_count": 950,
-            },
-            {
-                "name": "quantity",
-                "type": "number",
-                "nullable": False,
-                "sample_values": [10, 15, 12],
-                "unique_count": 100,
-            },
-        ],
-        "created_at": "2025-01-01T00:00:00Z",
-        "updated_at": "2025-01-01T10:30:00Z",
-        "status": "ready",
-    },
-    "project_002": {
-        "id": "project_002",
-        "user_id": "user_001",
-        "name": "Customer Demographics",
-        "description": "Customer data analysis",
-        "csv_filename": "customers.csv",
-        "csv_path": "user_001/project_002/customers.csv",
-        "row_count": 500,
-        "column_count": 6,
-        "columns_metadata": [
-            {
-                "name": "customer_id",
-                "type": "number",
-                "nullable": False,
-                "sample_values": [1, 2, 3],
-                "unique_count": 500,
-            },
-            {
-                "name": "age",
-                "type": "number",
-                "nullable": True,
-                "sample_values": [25, 30, 45],
-                "unique_count": 60,
-            },
-            {
-                "name": "city",
-                "type": "string",
-                "nullable": False,
-                "sample_values": ["New York", "Los Angeles", "Chicago"],
-                "unique_count": 25,
-            },
-        ],
-        "created_at": "2025-01-02T00:00:00Z",
-        "updated_at": "2025-01-02T08:15:00Z",
-        "status": "ready",
-    },
-}
+# Removed mock projects database - now using real database
 
 
 @router.get("")
@@ -111,28 +34,56 @@ async def get_projects(
 ) -> ApiResponse[PaginatedResponse[Project]]:
     """Get user's projects with pagination"""
 
-    # Filter projects by user_id
-    user_projects = [
-        Project(**project_data)
-        for project_data in MOCK_PROJECTS.values()
-        if project_data["user_id"] == user_id
-    ]
+    try:
+        user_uuid = uuid.UUID(user_id)
 
-    # Apply pagination
-    total = len(user_projects)
-    start_idx = (page - 1) * limit
-    end_idx = start_idx + limit
-    projects_page = user_projects[start_idx:end_idx]
+        # Get projects from database
+        skip = (page - 1) * limit
+        projects_db = project_service.get_projects_by_user(
+            user_uuid, skip=skip, limit=limit
+        )
+        total = project_service.count_projects_by_user(user_uuid)
 
-    paginated_response = PaginatedResponse(
-        items=projects_page,
-        total=total,
-        page=page,
-        limit=limit,
-        hasMore=end_idx < total,
-    )
+        # Convert to API response format
+        projects_api = [
+            ProjectPublic.from_db_project(project) for project in projects_db
+        ]
 
-    return ApiResponse(success=True, data=paginated_response)
+        # Convert to Project schema for response
+        projects_response = [
+            Project(
+                id=project.id,
+                user_id=project.user_id,
+                name=project.name,
+                description=project.description,
+                csv_filename=project.csv_filename,
+                csv_path=project.csv_path,
+                row_count=project.row_count,
+                column_count=project.column_count,
+                columns_metadata=project.columns_metadata,
+                created_at=project.created_at,
+                updated_at=project.updated_at,
+                status=project.status,
+            )
+            for project in projects_api
+        ]
+
+        paginated_response = PaginatedResponse(
+            items=projects_response,
+            total=total,
+            page=page,
+            limit=limit,
+            hasMore=(skip + limit) < total,
+        )
+
+        return ApiResponse(success=True, data=paginated_response)
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid user ID: {str(e)}")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch projects: {str(e)}"
+        )
 
 
 @router.post("")
@@ -141,41 +92,56 @@ async def create_project(
 ) -> ApiResponse[CreateProjectResponse]:
     """Create new project"""
 
-    project_id = str(uuid.uuid4())
+    try:
+        user_uuid = uuid.UUID(user_id)
 
-    project = Project(
-        id=project_id,
-        user_id=user_id,
-        name=request.name,
-        description=request.description,
-        csv_filename="",  # Will be set after upload
-        csv_path=f"{user_id}/{project_id}/",
-        row_count=0,
-        column_count=0,
-        columns_metadata=[],
-        created_at=datetime.utcnow().isoformat() + "Z",
-        updated_at=datetime.utcnow().isoformat() + "Z",
-        status=ProjectStatus.UPLOADING,
-    )
+        # Create project in database
+        project_create = ProjectCreate(
+            name=request.name, description=request.description
+        )
+        project_db = project_service.create_project(project_create, user_uuid)
 
-    # Mock upload URL and fields
-    upload_url = f"https://mock-storage.example.com/upload"
-    upload_fields = {
-        "key": f"{user_id}/{project_id}/data.csv",
-        "policy": "mock_base64_policy",
-        "signature": "mock_signature",
-        "x-amz-algorithm": "AWS4-HMAC-SHA256",
-        "x-amz-credential": "mock_credentials",
-    }
+        # Convert to API response format
+        project_api = ProjectPublic.from_db_project(project_db)
+        project_response = Project(
+            id=project_api.id,
+            user_id=project_api.user_id,
+            name=project_api.name,
+            description=project_api.description,
+            csv_filename=project_api.csv_filename,
+            csv_path=project_api.csv_path,
+            row_count=project_api.row_count,
+            column_count=project_api.column_count,
+            columns_metadata=project_api.columns_metadata,
+            created_at=project_api.created_at,
+            updated_at=project_api.updated_at,
+            status=project_api.status,
+        )
 
-    # Store in mock database
-    MOCK_PROJECTS[project_id] = project.model_dump()
+        # Generate presigned URL for file upload
+        object_name = f"{user_id}/{project_db.id}/data.csv"
+        upload_url = storage_service.generate_presigned_url(object_name)
 
-    response = CreateProjectResponse(
-        project=project, upload_url=upload_url, upload_fields=upload_fields
-    )
+        if not upload_url:
+            raise HTTPException(status_code=500, detail="Failed to generate upload URL")
 
-    return ApiResponse(success=True, data=response)
+        # MinIO presigned URLs don't use fields like AWS S3
+        upload_fields = {
+            "key": object_name,
+        }
+
+        response = CreateProjectResponse(
+            project=project_response, upload_url=upload_url, upload_fields=upload_fields
+        )
+
+        return ApiResponse(success=True, data=response)
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid input: {str(e)}")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to create project: {str(e)}"
+        )
 
 
 @router.get("/{project_id}")
@@ -184,17 +150,45 @@ async def get_project(
 ) -> ApiResponse[Project]:
     """Get project details"""
 
-    if project_id not in MOCK_PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        user_uuid = uuid.UUID(user_id)
+        project_uuid = uuid.UUID(project_id)
 
-    project_data = MOCK_PROJECTS[project_id]
+        # Get project from database
+        project_db = project_service.get_project_by_id(project_uuid)
 
-    # Check ownership
-    if project_data["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        if not project_db:
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    project = Project(**project_data)
-    return ApiResponse(success=True, data=project)
+        # Check ownership
+        if project_db.user_id != user_uuid:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        # Convert to API response format
+        project_api = ProjectPublic.from_db_project(project_db)
+        project_response = Project(
+            id=project_api.id,
+            user_id=project_api.user_id,
+            name=project_api.name,
+            description=project_api.description,
+            csv_filename=project_api.csv_filename,
+            csv_path=project_api.csv_path,
+            row_count=project_api.row_count,
+            column_count=project_api.column_count,
+            columns_metadata=project_api.columns_metadata,
+            created_at=project_api.created_at,
+            updated_at=project_api.updated_at,
+            status=project_api.status,
+        )
+
+        return ApiResponse(success=True, data=project_response)
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid project ID: {str(e)}")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch project: {str(e)}"
+        )
 
 
 @router.delete("/{project_id}")
@@ -203,19 +197,30 @@ async def delete_project(
 ) -> ApiResponse[Dict[str, str]]:
     """Delete project"""
 
-    if project_id not in MOCK_PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        user_uuid = uuid.UUID(user_id)
+        project_uuid = uuid.UUID(project_id)
 
-    project_data = MOCK_PROJECTS[project_id]
+        # Check if project exists and user owns it
+        if not project_service.check_project_ownership(project_uuid, user_uuid):
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    # Check ownership
-    if project_data["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        # Delete project from database
+        success = project_service.delete_project(project_uuid)
 
-    # Delete from mock database
-    del MOCK_PROJECTS[project_id]
+        if not success:
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    return ApiResponse(success=True, data={"message": "Project deleted successfully"})
+        return ApiResponse(
+            success=True, data={"message": "Project deleted successfully"}
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid project ID: {str(e)}")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to delete project: {str(e)}"
+        )
 
 
 @router.get("/{project_id}/upload-url")
@@ -224,25 +229,36 @@ async def get_upload_url(
 ) -> ApiResponse[Dict[str, Any]]:
     """Get presigned URL for file upload"""
 
-    if project_id not in MOCK_PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        user_uuid = uuid.UUID(user_id)
+        project_uuid = uuid.UUID(project_id)
 
-    project_data = MOCK_PROJECTS[project_id]
+        # Check if project exists and user owns it
+        if not project_service.check_project_ownership(project_uuid, user_uuid):
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    # Check ownership
-    if project_data["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        # Generate presigned URL for file upload
+        object_name = f"{user_id}/{project_id}/data.csv"
+        upload_url = storage_service.generate_presigned_url(object_name)
 
-    upload_data = {
-        "upload_url": f"https://mock-storage.example.com/upload",
-        "upload_fields": {
-            "key": f"{user_id}/{project_id}/data.csv",
-            "policy": "mock_base64_policy",
-            "signature": "mock_signature",
-        },
-    }
+        if not upload_url:
+            raise HTTPException(status_code=500, detail="Failed to generate upload URL")
 
-    return ApiResponse(success=True, data=upload_data)
+        upload_data = {
+            "upload_url": upload_url,
+            "upload_fields": {
+                "key": object_name,
+            },
+        }
+
+        return ApiResponse(success=True, data=upload_data)
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid project ID: {str(e)}")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate upload URL: {str(e)}"
+        )
 
 
 @router.get("/{project_id}/status")
@@ -251,25 +267,49 @@ async def get_project_status(
 ) -> ApiResponse[UploadStatusResponse]:
     """Get project processing status"""
 
-    if project_id not in MOCK_PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        user_uuid = uuid.UUID(user_id)
+        project_uuid = uuid.UUID(project_id)
 
-    project_data = MOCK_PROJECTS[project_id]
+        # Get project from database
+        project_db = project_service.get_project_by_id(project_uuid)
 
-    # Check ownership
-    if project_data["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        if not project_db:
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    # Mock status based on project status
-    status_response = UploadStatusResponse(
-        project_id=project_id,
-        status=project_data["status"],
-        progress=100 if project_data["status"] == "ready" else 75,
-        message=(
-            "Processing complete"
-            if project_data["status"] == "ready"
-            else "Analyzing CSV schema..."
-        ),
-    )
+        # Check ownership
+        if project_db.user_id != user_uuid:
+            raise HTTPException(status_code=403, detail="Access denied")
 
-    return ApiResponse(success=True, data=status_response)
+        # Determine progress and message based on status
+        progress = 0
+        message = ""
+
+        if project_db.status == "uploading":
+            progress = 25
+            message = "Waiting for file upload..."
+        elif project_db.status == "processing":
+            progress = 75
+            message = "Analyzing CSV schema..."
+        elif project_db.status == "ready":
+            progress = 100
+            message = "Processing complete"
+        elif project_db.status == "error":
+            progress = 0
+            message = "Processing failed"
+
+        status_response = UploadStatusResponse(
+            project_id=project_id,
+            status=project_db.status,
+            progress=progress,
+            message=message,
+        )
+
+        return ApiResponse(success=True, data=status_response)
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid project ID: {str(e)}")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch project status: {str(e)}"
+        )

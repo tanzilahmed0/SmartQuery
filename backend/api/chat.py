@@ -5,7 +5,6 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from api.projects import MOCK_PROJECTS
 from middleware.auth_middleware import verify_token
 from models.response_schemas import (
     ApiResponse,
@@ -17,8 +16,10 @@ from models.response_schemas import (
     SendMessageRequest,
     SendMessageResponse,
 )
+from services.project_service import get_project_service
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+project_service = get_project_service()
 
 # Mock chat messages database
 MOCK_CHAT_MESSAGES = {}
@@ -241,12 +242,15 @@ async def send_message(
     """Send message and get query results"""
 
     # Verify project exists and user has access
-    if project_id not in MOCK_PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        user_uuid = uuid.UUID(user_id)
+        project_uuid = uuid.UUID(project_id)
 
-    project_data = MOCK_PROJECTS[project_id]
-    if project_data["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        if not project_service.check_project_ownership(project_uuid, user_uuid):
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
 
     # Create user message
     user_message = ChatMessage(
@@ -293,12 +297,15 @@ async def get_messages(
     """Get chat message history"""
 
     # Verify project exists and user has access
-    if project_id not in MOCK_PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        user_uuid = uuid.UUID(user_id)
+        project_uuid = uuid.UUID(project_id)
 
-    project_data = MOCK_PROJECTS[project_id]
-    if project_data["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        if not project_service.check_project_ownership(project_uuid, user_uuid):
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
 
     # Get messages for project
     messages_data = MOCK_CHAT_MESSAGES.get(project_id, [])
@@ -328,12 +335,15 @@ async def get_csv_preview(
     """Get CSV data preview"""
 
     # Verify project exists and user has access
-    if project_id not in MOCK_PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        user_uuid = uuid.UUID(user_id)
+        project_uuid = uuid.UUID(project_id)
 
-    project_data = MOCK_PROJECTS[project_id]
-    if project_data["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        if not project_service.check_project_ownership(project_uuid, user_uuid):
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
 
     # Get preview data for project
     if project_id not in MOCK_CSV_PREVIEWS:
@@ -352,12 +362,15 @@ async def get_query_suggestions(
     """Get query suggestions"""
 
     # Verify project exists and user has access
-    if project_id not in MOCK_PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        user_uuid = uuid.UUID(user_id)
+        project_uuid = uuid.UUID(project_id)
 
-    project_data = MOCK_PROJECTS[project_id]
-    if project_data["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        if not project_service.check_project_ownership(project_uuid, user_uuid):
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
 
     # Return mock suggestions
     suggestions = [QuerySuggestion(**sug) for sug in MOCK_SUGGESTIONS]

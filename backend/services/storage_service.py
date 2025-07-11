@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import timedelta
 from typing import Any, Dict, Optional
 
 from minio import Minio
@@ -80,7 +81,7 @@ class StorageService:
         try:
             client = self.get_client()
             url = client.presigned_put_object(
-                self.bucket_name, object_name, expires=expiry_seconds
+                self.bucket_name, object_name, expires=timedelta(seconds=expiry_seconds)
             )
             return url
         except Exception as e:
