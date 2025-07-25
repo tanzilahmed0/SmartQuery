@@ -17,6 +17,7 @@ from models.response_schemas import (
     SendMessageResponse,
 )
 from services.project_service import get_project_service
+from services.llm_service import llm_service
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 project_service = get_project_service()
@@ -262,8 +263,24 @@ async def send_message(
         created_at=datetime.utcnow().isoformat() + "Z",
     )
 
-    # Generate mock query result
-    query_result = generate_mock_query_result(request.message, project_id)
+    # Use LLMService for AI response, fallback to mock if not configured
+    try:
+        ai_content = llm_service.run(request.message)
+        # For now, just echo the LLM response as the AI message content
+        query_result = QueryResult(
+            id=str(uuid.uuid4()),
+            query=request.message,
+            sql_query="",  # To be filled by future agent logic
+            result_type="summary",
+            data=[],
+            execution_time=0.0,
+            row_count=0,
+            chart_config=None,
+        )
+    except Exception as e:
+        # Fallback to mock logic if LLM not available
+        ai_content = f"[MOCK] Here are the results for your query: '{request.message}'"
+        query_result = generate_mock_query_result(request.message, project_id)
 
     # Store message in mock database
     if project_id not in MOCK_CHAT_MESSAGES:
@@ -275,7 +292,7 @@ async def send_message(
         id=str(uuid.uuid4()),
         project_id=project_id,
         user_id="assistant",
-        content=f"Here are the results for your query: '{request.message}'",
+        content=ai_content,
         role="assistant",
         created_at=datetime.utcnow().isoformat() + "Z",
         metadata={"query_result_id": query_result.id},
